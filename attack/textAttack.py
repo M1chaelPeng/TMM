@@ -38,10 +38,16 @@ class TextAttacker():
         adv_texts = []
         for i in range(len(texts)):
             text = texts[i]
-            weights = origin_output['weights'][i]
-            sorted_weights, sorted_indices = torch.sort(weights, descending=True)
-
             words, sub_words, keys = self._tokenize(text)
+            
+            # Check if weights are available, otherwise use uniform weights
+            if 'weights' in origin_output and origin_output['weights'] is not None:
+                weights = origin_output['weights'][i]
+            else:
+                # Use uniform weights for all words (will result in sequential order)
+                weights = torch.ones(len(words), device=self.device)
+            
+            sorted_weights, sorted_indices = torch.sort(weights, descending=True)
             final_words = copy.deepcopy(words)
             change = 0
 

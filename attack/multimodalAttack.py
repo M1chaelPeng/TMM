@@ -1,6 +1,9 @@
 import torch
 from torchvision import transforms
 import numpy as np
+from scipy.ndimage import zoom
+from pytorch_msssim import ssim
+from .imageAttack import ImageAttacker
 
 images_normalize = transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
 
@@ -10,7 +13,7 @@ def equal_normalize(x):
 gx = 1
 cx = []
 class MultiModalAttacker():
-    def __init__(self, net, text_attacker, tokenizer, cls=True, *args, **kwargs):
+    def __init__(self, net, text_attacker, tokenizer, cls=True, image_attacker=None, *args, **kwargs):
         self.net = net
         self.text_attacker = text_attacker
         self.tokenizer = tokenizer
@@ -19,6 +22,54 @@ class MultiModalAttacker():
             self.sample_batch_size = text_attacker.sample_batch_size
         
         self.repeat = 1
+        self.image_normalize = images_normalize
+        self.image_attacker = image_attacker
+        self.ssim = ssim
+
+    def getGradCam(self, gradcam, target_size):
+        """
+        Resize GradCAM attention map to target image size.
+        
+        Args:
+            gradcam: GradCAM map with shape (H, W, C) or (H, W)
+            target_size: Target size tuple (height, width)
+        
+        Returns:
+            Resized GradCAM map as numpy array
+        """
+        if isinstance(gradcam, torch.Tensor):
+            gradcam = gradcam.cpu().numpy()
+        
+        # Handle different input shapes
+        if len(gradcam.shape) == 2:
+            gradcam = gradcam[:, :, np.newaxis]
+        
+        H, W, C = gradcam.shape
+        target_h, target_w = target_size
+        
+        # Calculate zoom factors
+        zoom_h = target_h / H
+        zoom_w = target_w / W
+        
+        # Resize using scipy zoom (bilinear interpolation)
+        resized = zoom(gradcam, (zoom_h, zoom_w, 1), order=1)
+        
+        # Ensure exact target size (handle rounding)
+        if resized.shape[0] != target_h or resized.shape[1] != target_w:
+            # Crop or pad to exact size
+            if resized.shape[0] > target_h:
+                resized = resized[:target_h, :, :]
+            elif resized.shape[0] < target_h:
+                padding = np.zeros((target_h - resized.shape[0], resized.shape[1], C))
+                resized = np.concatenate([resized, padding], axis=0)
+            
+            if resized.shape[1] > target_w:
+                resized = resized[:, :target_w, :]
+            elif resized.shape[1] < target_w:
+                padding = np.zeros((resized.shape[0], target_w - resized.shape[1], C))
+                resized = np.concatenate([resized, padding], axis=1)
+        
+        return resized
 
     def get_origin_and_adv_embeds(self, images, text, device, max_length, k):
         with torch.no_grad():
@@ -45,6 +96,11 @@ class MultiModalAttacker():
         return origin_embeds, text_adv_embed, text_input, origin_output, text_adv_input, text_adv
     
     def getAtt(self, attImage, text_input, device, indices, args):
+        # Enable attention saving for cross-attention layers
+        for blk in range(6, len(self.net.text_encoder.base_model.base_model.encoder.layer)):
+            if hasattr(self.net.text_encoder.base_model.base_model.encoder.layer[blk], 'crossattention'):
+                if hasattr(self.net.text_encoder.base_model.base_model.encoder.layer[blk].crossattention, 'self'):
+                    self.net.text_encoder.base_model.base_model.encoder.layer[blk].crossattention.self.save_attention = True
         
         image_embeds = self.net.visual_encoder(images_normalize(attImage))
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(device)
@@ -64,15 +120,18 @@ class MultiModalAttacker():
             cam = []
             mask_att = text_input.attention_mask.view(text_input.attention_mask.size(0), 1, -1, 1, 1)
             for blk in range(6, len(self.net.text_encoder.base_model.base_model.encoder.layer)):
-                grads = self.net.text_encoder.base_model.base_model.encoder.layer[
-                    blk].crossattention.self.get_attn_gradients().detach()
-                cams = self.net.text_encoder.base_model.base_model.encoder.layer[
-                    blk].crossattention.self.get_attention_map().detach()
-                cams = cams[:, :, :, 1:].reshape(attImage.size(0), 12, -1, 24, 24) * mask_att
-                grads = grads[:, :, :, 1:].clamp(min=0).reshape(attImage.size(0), 12, -1, 24, 24) * mask_att
-                gradcam = cams * grads
-                gradcam = gradcam.mean(1).mean(1)
-                cam.append(gradcam)
+                layer = self.net.text_encoder.base_model.base_model.encoder.layer[blk]
+                if hasattr(layer, 'crossattention') and hasattr(layer.crossattention, 'self'):
+                    attn_grads = layer.crossattention.self.get_attn_gradients()
+                    attn_map = layer.crossattention.self.get_attention_map()
+                    if attn_grads is not None and attn_map is not None:
+                        grads = attn_grads.detach()
+                        cams = attn_map.detach()
+                        cams = cams[:, :, :, 1:].reshape(attImage.size(0), 12, -1, 24, 24) * mask_att
+                        grads = grads[:, :, :, 1:].clamp(min=0).reshape(attImage.size(0), 12, -1, 24, 24) * mask_att
+                        gradcam = cams * grads
+                        gradcam = gradcam.mean(1).mean(1)
+                        cam.append(gradcam)
             gradcam = 0
             for i in range(len(cam)):
                 gradcam += cam[i]

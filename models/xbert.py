@@ -244,18 +244,24 @@ class BertSelfAttention(nn.Module):
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
             self.max_position_embeddings = config.max_position_embeddings
             self.distance_embedding = nn.Embedding(2 * config.max_position_embeddings - 1, self.attention_head_size)
-        self.save_attention = False   
+        self.save_attention = False
+        self.attn_gradients = None
+        self.attention_map = None
             
     def save_attn_gradients(self, attn_gradients):
         self.attn_gradients = attn_gradients
         
     def get_attn_gradients(self):
+        if self.attn_gradients is None:
+            return None
         return self.attn_gradients
     
     def save_attention_map(self, attention_map):
         self.attention_map = attention_map
         
     def get_attention_map(self):
+        if self.attention_map is None:
+            return None
         return self.attention_map
 
     def transpose_for_scores(self, x):
