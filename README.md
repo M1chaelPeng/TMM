@@ -1,6 +1,6 @@
 # Transferable Multimodal Attack on Vision-Language Pre-training Models
 
-This is the official PyTorch implementation of the paper "Transferable Multimodal Attack on Vision-Language Pre-training Models".
+This is a fixed (patched) implementation of the paper "Transferable Multimodal Attack on Vision-Language Pre-training Models" in PyTorch.
 
 ## Requirements
 - Python 3.8
